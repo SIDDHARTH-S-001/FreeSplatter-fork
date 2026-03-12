@@ -3,7 +3,6 @@ import math
 import scipy
 import numpy as np
 import torch
-import open3d as o3d
 from tqdm import tqdm
 
 from .camera_util import create_camera_to_world
@@ -81,6 +80,14 @@ def get_circular_cameras(N=120, elevation=0, radius=2.0, normalize=True, device=
 ###############################################################################
 
 def rgbd_to_mesh(images, depths, c2ws, fov, mesh_path, cam_elev_thr=0):
+    try:
+        import open3d as o3d
+    except ImportError:
+        raise RuntimeError(
+            "open3d is required for TSDF mesh fusion but is not installed "
+            "(no Python 3.13 wheels available). "
+            "Use the Gaussian splat output instead."
+        )
 
     voxel_length = 2 * 2.0 / 512.0
     sdf_trunc = 2 * 0.02
