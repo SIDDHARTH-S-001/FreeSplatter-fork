@@ -40,10 +40,9 @@ def numpy2pytorch(imgs):
     return h
 
 
-@torch.inference_mode()
 def remove_background(
     image: PIL.Image.Image,
-    rembg: Any = None,
+    rembg_session: Any = None,
     force: bool = False,
     **rembg_kwargs,
 ) -> PIL.Image.Image:
@@ -52,63 +51,8 @@ def remove_background(
         do_remove = False
     do_remove = do_remove or force
     if do_remove:
-        W, H = image.size
-        k = (256.0 / float(H * W)) ** 0.5
-        feed = resize_without_crop(image, int(64 * round(W * k)), int(64 * round(H * k)))
-        feed = numpy2pytorch([feed]).to(device=rembg.device, dtype=torch.float32)
-        alpha = rembg(feed)[0][0]
-        alpha = torch.nn.functional.interpolate(alpha, size=(H, W), mode="bilinear")
-        alpha = alpha.squeeze().clamp(0, 1)
-        alpha = (alpha * 255).cpu().data.numpy().astype(np.uint8)
-        alpha = Image.fromarray(alpha)
-
-        no_bg_image = Image.new("RGBA", alpha.size, (0, 0, 0, 0))
-        no_bg_image.paste(image, mask=alpha)
-        image = no_bg_image
+        image = rembg.remove(image, session=rembg_session, **rembg_kwargs)
     return image
-
-
-@torch.inference_mode()
-def remove_background(
-    image: PIL.Image.Image,
-    rembg: Any = None,
-    force: bool = False,
-    **rembg_kwargs,
-) -> PIL.Image.Image:
-    do_remove = True
-    if image.mode == "RGBA" and image.getextrema()[3][0] < 255:
-        do_remove = False
-    do_remove = do_remove or force
-    if do_remove:
-        transform_image = transforms.Compose([
-            transforms.Resize((1024, 1024)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
-        image = image.convert('RGB')
-        input_images = transform_image(image).unsqueeze(0).to(rembg.device)
-        with torch.no_grad():
-            preds = rembg(input_images)[-1].sigmoid().cpu()
-        pred = preds[0].squeeze()
-        pred_pil = transforms.ToPILImage()(pred)
-        mask = pred_pil.resize(image.size)
-        image.putalpha(mask)
-    return image
-
-
-# def remove_background(
-#     image: PIL.Image.Image,
-#     rembg_session: Any = None,
-#     force: bool = False,
-#     **rembg_kwargs,
-# ) -> PIL.Image.Image:
-#     do_remove = True
-#     if image.mode == "RGBA" and image.getextrema()[3][0] < 255:
-#         do_remove = False
-#     do_remove = do_remove or force
-#     if do_remove:
-#         image = rembg.remove(image, session=rembg_session, **rembg_kwargs)
-#     return image
 
 
 def resize_foreground(
