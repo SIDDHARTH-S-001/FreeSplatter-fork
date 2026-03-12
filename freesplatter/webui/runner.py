@@ -19,10 +19,8 @@ from scipy.spatial.transform import Rotation
 from safetensors import safe_open
 from huggingface_hub import hf_hub_download
 
-from transformers import AutoModelForImageSegmentation
-from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
+import rembg as rembg_lib
 
-from freesplatter.hunyuan.hunyuan3d_mvd_std_pipeline import HunYuan3D_MVD_Std_Pipeline
 from freesplatter.utils.mesh_optim import optimize_mesh
 from freesplatter.utils.camera_util import *
 from freesplatter.utils.recon_util import *
@@ -74,57 +72,17 @@ class FreeSplatterRunner:
     def __init__(self, device):
         self.device = device
 
-        # background remover
-        self.rembg = AutoModelForImageSegmentation.from_pretrained(
-            "briaai/RMBG-2.0",
-            trust_remote_code=True,
-            cache_dir='ckpts/',
-        ).to(device)
-        self.rembg.eval()
+        # background remover — uses rembg (u2net), no gated repo required
+        self.rembg = rembg_lib.new_session('u2net')
 
-        # diffusion models
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.1", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
-            cache_dir="ckpts/",
-        )
-        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipeline.scheduler.config, timestep_spacing='trailing'
-        )
-        self.zero123plus_v11 = pipeline.to(device)
-
-        pipeline = DiffusionPipeline.from_pretrained(
-            "sudo-ai/zero123plus-v1.2", 
-            custom_pipeline="sudo-ai/zero123plus-pipeline",
-            torch_dtype=torch.float16,
-            cache_dir="ckpts/",
-        )
-        pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipeline.scheduler.config, timestep_spacing='trailing'
-        )
-        self.zero123plus_v12 = pipeline.to(device)
-
-        pipeline = HunYuan3D_MVD_Std_Pipeline.from_pretrained(
-            './ckpts/Hunyuan3D-1/mvd_std',
-            torch_dtype=torch.float16,
-            use_safetensors=True,
-        )
-        self.hunyuan3d_mvd_std = pipeline.to(device)
-
-        # freesplatter
-        config_file = 'configs/freesplatter-object.yaml'
-        ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-object.safetensors', local_dir='./ckpts/FreeSplatter')
-        model = instantiate_from_config(OmegaConf.load(config_file).model)
-        state_dict = {}
-        with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
-        model.load_state_dict(state_dict, strict=True)
-        self.freesplatter = model.eval().to(device)
-
+        # FreeSplatter-O-2dgs only (~1.23GB)
         config_file = 'configs/freesplatter-object-2dgs.yaml'
-        ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-object-2dgs.safetensors', local_dir='./ckpts/FreeSplatter')
+        ckpt_path = hf_hub_download(
+            'TencentARC/FreeSplatter',
+            repo_type='model',
+            filename='freesplatter-object-2dgs.safetensors',
+            local_dir='./ckpts/FreeSplatter',
+        )
         model = instantiate_from_config(OmegaConf.load(config_file).model)
         state_dict = {}
         with safe_open(ckpt_path, framework="pt", device="cpu") as f:
@@ -132,16 +90,6 @@ class FreeSplatterRunner:
                 state_dict[key] = f.get_tensor(key)
         model.load_state_dict(state_dict, strict=True)
         self.freesplatter_2dgs = model.eval().to(device)
-
-        config_file = 'configs/freesplatter-scene.yaml'
-        ckpt_path = hf_hub_download('TencentARC/FreeSplatter', repo_type='model', filename='freesplatter-scene.safetensors', local_dir='./ckpts/FreeSplatter')
-        model = instantiate_from_config(OmegaConf.load(config_file).model)
-        state_dict = {}
-        with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key)
-        model.load_state_dict(state_dict, strict=True)
-        self.freesplatter_scene = model.eval().to(device)
 
     @torch.inference_mode()
     def run_segmentation(
@@ -293,7 +241,7 @@ class FreeSplatterRunner:
         torch.cuda.empty_cache()
         device = self.device
 
-        freesplatter = self.freesplatter_2dgs if gs_type == '2DGS' else self.freesplatter
+        freesplatter = self.freesplatter_2dgs  # only 2DGS model loaded
 
         images, alphas = images.to(device), alphas.to(device)
         
