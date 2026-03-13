@@ -79,15 +79,92 @@ def get_circular_cameras(N=120, elevation=0, radius=2.0, normalize=True, device=
 # TSDF Fusion
 ###############################################################################
 
+def _rgbd_to_mesh_numpy(images, depths, c2ws, fov, mesh_path, cam_elev_thr=0):
+    """TSDF fusion fallback using numpy + skimage (no open3d required)."""
+    from skimage import measure
+    import trimesh as _trimesh
+
+    grid_res = 256
+    scene_size = 2.0
+    sdf_trunc = 0.04
+
+    tsdf_vol = np.zeros((grid_res, grid_res, grid_res), dtype=np.float32)
+    weight_vol = np.zeros((grid_res, grid_res, grid_res), dtype=np.float32)
+
+    lin = np.linspace(-scene_size, scene_size, grid_res, dtype=np.float32)
+    vox_x, vox_y, vox_z = np.meshgrid(lin, lin, lin, indexing='ij')
+    # (N, 4) homogeneous world coords
+    pts_w = np.stack([vox_x.ravel(), vox_y.ravel(), vox_z.ravel(),
+                      np.ones(grid_res ** 3, dtype=np.float32)], axis=1)
+
+    for i in tqdm(range(c2ws.shape[0])):
+        c2w = c2ws[i].astype(np.float32)
+        w2c = np.linalg.inv(c2w)
+
+        cam_pos = c2w[:3, 3]
+        elev = np.rad2deg(np.arcsin(cam_pos[2] / np.linalg.norm(cam_pos)))
+        if elev < cam_elev_thr:
+            continue
+
+        H, W = images[i].shape[:2]
+        fx = fy = W / 2.0 / np.tan(np.deg2rad(fov / 2.0))
+        cx, cy = W / 2.0, H / 2.0
+
+        pts_c = pts_w @ w2c.T        # (N, 4)
+        z = pts_c[:, 2]
+
+        valid_z = z > 1e-3
+        safe_z = np.where(valid_z, z, 1.0)
+        u = np.where(valid_z, fx * pts_c[:, 0] / safe_z + cx, -1.0)
+        v = np.where(valid_z, fy * pts_c[:, 1] / safe_z + cy, -1.0)
+
+        in_bounds = valid_z & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+
+        ui = np.clip(np.round(u).astype(np.int32), 0, W - 1)
+        vi = np.clip(np.round(v).astype(np.int32), 0, H - 1)
+
+        depth_map = depths[i].squeeze()
+        d_sampled = depth_map[vi, ui]
+
+        sdf = d_sampled - z
+        update_mask = in_bounds & (d_sampled > 0) & (sdf >= -sdf_trunc)
+
+        sdf_clipped = (np.clip(sdf, -sdf_trunc, sdf_trunc) / sdf_trunc).reshape(
+            grid_res, grid_res, grid_res)
+        w_upd = update_mask.astype(np.float32).reshape(grid_res, grid_res, grid_res)
+
+        new_weight = weight_vol + w_upd
+        tsdf_vol = (tsdf_vol * weight_vol + sdf_clipped * w_upd) / np.maximum(new_weight, 1e-10)
+        weight_vol = new_weight
+
+    try:
+        verts, faces, normals, _ = measure.marching_cubes(
+            tsdf_vol, level=0.0, mask=(weight_vol > 0))
+    except (ValueError, RuntimeError):
+        _trimesh.Trimesh().export(mesh_path)
+        return
+
+    # voxel indices → world coordinates
+    verts_world = verts / (grid_res - 1) * (2 * scene_size) - scene_size
+
+    mesh = _trimesh.Trimesh(vertices=verts_world, faces=faces,
+                            vertex_normals=normals, process=False)
+
+    # keep only the largest connected component (mirrors open3d cluster filter)
+    components = mesh.split(only_watertight=False)
+    if components:
+        mesh = max(components, key=lambda m: len(m.faces))
+
+    _trimesh.smoothing.filter_laplacian(mesh, lamb=0.5, iterations=2)
+    mesh.export(mesh_path)
+
+
 def rgbd_to_mesh(images, depths, c2ws, fov, mesh_path, cam_elev_thr=0):
     try:
         import open3d as o3d
     except ImportError:
-        raise RuntimeError(
-            "open3d is required for TSDF mesh fusion but is not installed "
-            "(no Python 3.13 wheels available). "
-            "Use the Gaussian splat output instead."
-        )
+        _rgbd_to_mesh_numpy(images, depths, c2ws, fov, mesh_path, cam_elev_thr)
+        return
 
     voxel_length = 2 * 2.0 / 512.0
     sdf_trunc = 2 * 0.02
