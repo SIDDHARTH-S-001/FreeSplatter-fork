@@ -130,7 +130,7 @@ class CameraVisualizer:
 
             edges = [(0, 1), (0, 2), (0, 3), (0, 4), (1, 2), (2, 3), (3, 4), (4, 1)]
 
-            if isinstance(fov_deg, float) or len(fov_deg) == 1:
+            if isinstance(fov_deg, (float, np.floating)) or len(fov_deg) == 1:
                 fov = fov_deg
             else:
                 fov = fov_deg[i]
